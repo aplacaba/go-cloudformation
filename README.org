@@ -1,0 +1,66 @@
+* GoWebServer
+Deploy web infrastracture for a hello world go app in AWS
+
+** How To Use
+*** Cloudformation
+To build infra, first we have to set the environment variables needed to run the scripts
+
+#+begin_src
+export VPC_ID=
+export CLUSTER_NAME=
+export STACK_NAME=
+#+end_src
+
+Next we'll make use of the helper scripts to run the cloudformation script
+**** Scripts
+***** ./scripts/create-stack
+Creates the cloudformation stack
+***** ./scripts/update-stack
+Updates the cloudformation stack
+***** ./scripts/cleanup
+Deletes the stack
+
+Run the create stack script
+#+begin_src
+./scripts/create-task
+#+end_src
+
+*** Github Actions
+Once cloud formation has completed. We can now have access to the Role ARN on the outputs.
+Define =GHA_ROLE_ARN= on actions secrets or change this line on main.yml
+
+#+begin_src
+role-to-assume: <your-arn>
+#+end_src
+
+Now that arn is set we can trigger the build pushing a commit
+
+#+begin_src
+touch sample.txt
+git commit -am "sample"
+#+end_src
+*** Update the Stack
+Once the workflow is done without failures.
+
+We need to update the service =DesiredCount= to a value greater than 0
+#+begin_src
+ECSService:
+  Properties:
+    ...
+    DesiredCount: 1
+#+end_src
+
+then update the stack
+
+#+begin_src
+./scripts/update-stack
+#+end_src
+
+*** Access the app
+On update stack complete, go to outputs tab and copy the loadbalancer dns name.
+
+** Cleanup
+
+Run the =./scripts/cleanup=
+
+if cleanup fails delete the repository on aws console and run the script again

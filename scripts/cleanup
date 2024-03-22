@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+
+aws ecr delete-repository --repository-name goweb
+aws cloudformation delete-stack --stack-name ${STACK_NAME}

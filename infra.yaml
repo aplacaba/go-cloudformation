@@ -1,0 +1,291 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Setup go web infra
+
+Parameters:
+  VpcID:
+    Type: String
+    Description: Existing VPC ID
+
+  ECSCluster:
+    Type: String
+    Description: Cluster
+
+  ApplicationName:
+    Type: String
+    Default: go-web-server
+    Description: Name of the application
+
+  GithubActionsThumbprint:
+    Type: CommaDelimitedList
+    Default: 6938fd4d98bab03faadb97b34396831e3780aea1
+    Description: >
+      Comma seperated list of thumbprints for GitHub Actions tokens.
+      Default comes from https://github.blog/changelog/2022-01-13-github-actions-update-on-oidc-based-deployments-to-aws/
+
+  AudienceList:
+    Type: CommaDelimitedList
+    Default: sts.amazonaws.com
+    Description: >
+      Comma seperated list of allowed audience for the tokens.
+      Default is audience for the official AWS configure action from https://github.com/aws-actions/configure-aws-credentials
+
+  SubjectClaimFilters:
+    Type: CommaDelimitedList
+    Default: "repo:aplacaba/go-web-server:*"
+
+Resources:
+  # VPC Network Config
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+          - 0
+          - Fn::GetAZs: !Ref 'AWS::Region'
+      VpcId: !Ref VpcID
+      CidrBlock: 172.31.1.0/24
+      MapPublicIpOnLaunch: true
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+          - 1
+          - Fn::GetAZs: !Ref 'AWS::Region'
+      VpcId: !Ref VpcID
+      CidrBlock: 172.31.3.0/24
+      MapPublicIpOnLaunch: true
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: stack
+          Value: test
+
+  # VPC Gateway Attachment
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VpcID
+      InternetGatewayId: !Ref InternetGateway
+
+  # Route Table (Public)
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcID
+
+  # Public Route (Internet)
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Subnet Route Table Association (Public)
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ECR Repository Config
+
+  GitHubIdentityProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ThumbprintList: !Ref GithubActionsThumbprint
+      ClientIdList: !Ref AudienceList
+
+  GitHubActionsServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RoleForGitHubActions
+            Effect: Allow
+            Principal:
+              Federated: !GetAtt GitHubIdentityProvider.Arn
+            Action:
+              - "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:aud": !Ref AudienceList
+              StringLike:
+                "token.actions.githubusercontent.com:sub": !Ref SubjectClaimFilters
+      Policies:
+        - PolicyName: ecr-essentials
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                  - "ecr:CompleteLayerUpload"
+                  - "ecr:UploadLayerPart"
+                  - "ecr:InitiateLayerUpload"
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:PutImage"
+                Resource: '*'
+
+      Description: Service Role for use in GitHub Actions
+      Path: /ghactions-role/
+
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: go-web-server
+
+  # ECS Service
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: "ECS-ECR-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "ecr:BatchGetImage"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:DescribeLogStreams"
+                Resource: "*"
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: go-web-server-task-definition
+      Cpu: '1024'
+      Memory: '2048'
+      NetworkMode: awsvpc
+      TaskRoleArn: !GetAtt [ECSTaskRole, Arn]
+      ExecutionRoleArn: !GetAtt [ECSTaskRole, Arn]
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+        - Name: !Ref ApplicationName
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/go-web-server:latest"
+          PortMappings:
+            - ContainerPort: 80
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: ap-southeast-1
+              awslogs-stream-prefix: go-web
+              awslogs-group: go-web-group
+              awslogs-create-group: true
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${ApplicationName}-lb
+      Subnets:
+        - !Ref PublicSubnet
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ServiceTargetGroup
+
+
+  # Load Balancer Security Group
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for ALB
+      VpcId: !Ref VpcID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp # for ecr
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # Target Group
+  ServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${ApplicationName}-TargetGroup
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcID
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      TargetType: ip
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: !Ref ApplicationName
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE  # Adjust if using EC2 instances
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 0  # Update this to your preferred number after initial setup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref LoadBalancerSecurityGroup
+          Subnets:
+            - !Ref PublicSubnet
+          AssignPublicIp: ENABLED
+      # Load balancer configuration
+      LoadBalancers:
+        - ContainerName: !Ref ApplicationName # Replace with actual container name
+          ContainerPort: 80  # Replace with container port exposed for health checks
+          TargetGroupArn: !Ref ServiceTargetGroup
+
+Outputs:
+  LoadBalancerDNSName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt LoadBalancer.DNSName
+
+  GHARole:
+    Description: Github actions role arn
+    Value: !GetAtt GitHubActionsServiceRole.Arn

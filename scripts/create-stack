@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+
+aws cloudformation create-stack \
+    --stack-name ${STACK_NAME} \
+    --template-body file://infra.yaml \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --parameters ParameterKey=VpcID,ParameterValue=${VPC_ID} ParameterKey=ECSCluster,ParameterValue=${CLUSTER_NAME}
